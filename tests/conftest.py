@@ -22,11 +22,13 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-def make_image_bytes(width: int = 320, height: int = 240, color=(120, 200, 90)) -> bytes:
-    """Create an in-memory PNG (no binary test assets are committed)."""
+def make_image_bytes(
+    width: int = 320, height: int = 240, color=(120, 200, 90), fmt: str = "PNG"
+) -> bytes:
+    """Create an in-memory image (no binary test assets are committed)."""
     img = Image.new("RGB", (width, height), color)
     buf = io.BytesIO()
-    img.save(buf, format="PNG")
+    img.save(buf, format=fmt)
     return buf.getvalue()
 
 
@@ -77,6 +79,12 @@ def stub_yolo(monkeypatch):
 @pytest.fixture
 def test_image_bytes() -> bytes:
     return make_image_bytes()
+
+
+@pytest.fixture
+def test_jpeg_bytes() -> bytes:
+    """JPEG bytes, like a frame captured from a webcam (canvas.toBlob)."""
+    return make_image_bytes(320, 240, (200, 120, 60), fmt="JPEG")
 
 
 @pytest.fixture
