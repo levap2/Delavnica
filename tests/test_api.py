@@ -40,6 +40,15 @@ def test_index_serves_browser_demo(client):
     assert "/detect" in html
 
 
+def test_index_includes_webcam_capture_ui(client):
+    response = client.get("/")
+    assert response.status_code == 200
+    html = response.text
+    assert "getUserMedia" in html          # standard browser media API
+    assert "<video" in html                # live camera preview
+    assert "Capture &amp; detect" in html  # single-frame capture action
+
+
 # ---------------------------------------------------------------- detect
 
 
@@ -79,6 +88,19 @@ def test_detect_valid_image_returns_schema(client, test_image_bytes, stub_yolo):
     # Sorted by confidence, descending.
     confs = [d["confidence"] for d in body["detections"]]
     assert confs == sorted(confs, reverse=True)
+
+
+def test_detect_accepts_jpeg_frame(client, test_jpeg_bytes, stub_yolo):
+    """Webcam frames arrive as JPEG; the endpoint must accept them."""
+    stub_yolo.next_boxes = []
+    response = client.post(
+        "/detect", files={"file": ("webcam_frame.jpg", test_jpeg_bytes, "image/jpeg")}
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["image_width"] == 320
+    assert body["image_height"] == 240
+    assert body["detections"] == []
 
 
 def test_detect_zero_detections_is_success(client, test_image_bytes, stub_yolo):
