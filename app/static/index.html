@@ -11,16 +11,22 @@
     max-width: 960px; margin: 0 auto; padding: 1rem; line-height: 1.45;
   }
   h1 { font-size: 1.4rem; }
+  h2 { font-size: 1.05rem; margin: 1.5rem 0 .4rem; }
   .hint { opacity: .75; font-size: .9rem; }
-  .controls { display: flex; gap: .75rem; align-items: center; flex-wrap: wrap; margin: 1rem 0; }
+  .controls { display: flex; gap: .75rem; align-items: center; flex-wrap: wrap; margin: .6rem 0; }
   button {
     padding: .5rem 1.1rem; font-size: 1rem; cursor: pointer;
     border: 1px solid #888; border-radius: 6px; background: #2563eb; color: #fff;
   }
+  button.secondary { background: #64748b; }
   button:disabled { opacity: .55; cursor: wait; }
   .stage { position: relative; display: none; max-width: 100%; }
   .stage img { display: block; max-width: 100%; height: auto; border-radius: 6px; }
   .stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  video#cam {
+    display: block; width: 320px; max-width: 100%; border-radius: 6px;
+    background: #000; margin: .4rem 0;
+  }
   #error {
     display: none; margin: 1rem 0; padding: .6rem .8rem; border-radius: 6px;
     background: #7f1d1d; color: #fee2e2; white-space: pre-wrap;
@@ -34,20 +40,29 @@
 <body>
 <h1>Delavnica — CPU-only YOLO detection</h1>
 <p class="hint">
-  Choose an image, then run detection. The server runs pretrained
-  <code>yolo26n.pt</code> on CPU and draws boxes here from the JSON response.
+  The server runs pretrained <code>yolo26n.pt</code> on CPU and draws boxes here
+  from the JSON response. Upload an image, or capture a frame from your webcam.
 </p>
 
+<div id="error" role="alert"></div>
+
+<h2>1 · Image upload</h2>
 <div class="controls">
   <input type="file" id="file" accept="image/*" />
   <button id="detectBtn" disabled>Detect</button>
   <span id="busy" class="hint" hidden>Detecting…</span>
 </div>
 
-<div id="error" role="alert"></div>
+<h2>2 · Webcam (single-frame capture)</h2>
+<div class="controls">
+  <button id="camBtn" class="secondary">Start webcam</button>
+  <button id="camCapBtn" disabled>Capture &amp; detect</button>
+  <span class="hint">Camera runs locally in your browser; only the captured frame is sent to the server.</span>
+</div>
+<video id="cam" hidden playsinline muted></video>
 
 <div class="stage" id="stage">
-  <img id="preview" alt="Uploaded image preview" />
+  <img id="preview" alt="Image preview" />
   <canvas id="overlay"></canvas>
 </div>
 
@@ -65,6 +80,11 @@
   var preview = document.getElementById("preview");
   var overlay = document.getElementById("overlay");
   var results = document.getElementById("results");
+  var camBtn = document.getElementById("camBtn");
+  var camCapBtn = document.getElementById("camCapBtn");
+  var camVideo = document.getElementById("cam");
+
+  var stream = null;
   var currentFile = null;
 
   function showError(message) {
@@ -76,14 +96,29 @@
     overlay.getContext("2d").clearRect(0, 0, overlay.width, overlay.height);
   }
 
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+
+  function showFrame(blob) {
+    var url = URL.createObjectURL(blob);
+    preview.onload = function () {
+      // Size the canvas to the image's natural dimensions so that
+      // original-coordinate boxes map 1:1 onto the displayed frame.
+      overlay.width = preview.naturalWidth;
+      overlay.height = preview.naturalHeight;
+      stage.style.display = "block";
+    };
+    preview.src = url;
+  }
+
   function renderDetections(detections, inferenceMs, meta) {
     var ctx = overlay.getContext("2d");
     clearBoxes();
 
     var rows = detections.map(function (d, i) {
-      // Draw in original-image pixel coordinates; the canvas is sized to the
-      // image's natural dimensions and scaled by CSS to the displayed size,
-      // so coordinates map 1:1 without manual scaling.
       var x = d.box[0], y = d.box[1];
       var w = d.box[2] - d.box[0], h = d.box[3] - d.box[1];
       var color = "hsl(" + ((d.class_id * 47) % 360) + ", 85%, 55%)";
@@ -119,41 +154,16 @@
         : "");
   }
 
-  function escapeHtml(s) {
-    return String(s).replace(/[&<>"']/g, function (c) {
-      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
-    });
-  }
-
-  fileInput.addEventListener("change", function () {
-    currentFile = fileInput.files && fileInput.files[0] ? fileInput.files[0] : null;
-    detectBtn.disabled = !currentFile;
-    showError("");
-    results.innerHTML = "";
-    if (!currentFile) {
-      stage.style.display = "none";
-      preview.removeAttribute("src");
-      return;
-    }
-    var url = URL.createObjectURL(currentFile);
-    preview.onload = function () {
-      // Size the canvas to the image's natural (original) dimensions.
-      overlay.width = preview.naturalWidth;
-      overlay.height = preview.naturalHeight;
-      stage.style.display = "block";
-    };
-    preview.src = url;
-  });
-
-  detectBtn.addEventListener("click", function () {
-    if (!currentFile) return;
+  // Shared submit path for uploaded files and captured webcam frames.
+  function sendToServer(blob, name, type) {
     detectBtn.disabled = true;
+    camCapBtn.disabled = true;
     busy.hidden = false;
     showError("");
     results.innerHTML = "";
 
     var form = new FormData();
-    form.append("file", currentFile);
+    form.append("file", blob, name);
 
     fetch("/detect", { method: "POST", body: form })
       .then(function (res) {
@@ -161,8 +171,7 @@
           throw new Error("Server returned non-JSON response (HTTP " + res.status + ").");
         }).then(function (body) {
           if (!res.ok) {
-            var msg = (body && body.detail) ? body.detail : "HTTP " + res.status;
-            throw new Error(msg);
+            throw new Error((body && body.detail) ? body.detail : "HTTP " + res.status);
           }
           return body;
         });
@@ -175,9 +184,115 @@
       })
       .finally(function () {
         busy.hidden = true;
-        detectBtn.disabled = false;
+        detectBtn.disabled = !currentFile;
+        camCapBtn.disabled = !stream;
       });
+  }
+
+  // ------------------------------------------------------- image upload
+
+  fileInput.addEventListener("change", function () {
+    currentFile = fileInput.files && fileInput.files[0] ? fileInput.files[0] : null;
+    detectBtn.disabled = !currentFile;
+    showError("");
+    results.innerHTML = "";
+    if (!currentFile) {
+      stage.style.display = "none";
+      preview.removeAttribute("src");
+      return;
+    }
+    showFrame(currentFile);
   });
+
+  detectBtn.addEventListener("click", function () {
+    if (currentFile) {
+      sendToServer(currentFile, currentFile.name, currentFile.type || "application/octet-stream");
+    }
+  });
+
+  // ------------------------------------------------------------- webcam
+
+  function stopCamera() {
+    if (stream) {
+      stream.getTracks().forEach(function (t) { t.stop(); });
+      stream = null;
+    }
+    camVideo.srcObject = null;
+    camVideo.hidden = true;
+    camCapBtn.disabled = true;
+    camBtn.textContent = "Start webcam";
+  }
+
+  function startCamera() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      showError("Webcam capture is not available in this browser (missing getUserMedia).");
+      return;
+    }
+    // getUserMedia only works in a secure context: https:// or localhost.
+    var local = ["localhost", "127.0.0.1", "::1"].indexOf(location.hostname) !== -1;
+    if (location.protocol === "http:" && !local) {
+      showError("Browsers only allow camera access on https:// or localhost. " +
+        "Open this page at http://localhost:8000 (or serve over HTTPS) to use the webcam.");
+      return;
+    }
+
+    camBtn.disabled = true;
+    navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: false })
+      .then(function (s) {
+        stream = s;
+        camVideo.srcObject = s;
+        return camVideo.play();
+      })
+      .then(function () {
+        camVideo.hidden = false;
+        camCapBtn.disabled = false;
+        camBtn.textContent = "Stop webcam";
+        showError("");
+      })
+      .catch(function (err) {
+        var msg = "Could not start the webcam.";
+        if (err && err.name === "NotAllowedError") {
+          msg = "Camera access was denied. Allow camera permission for this site and try again.";
+        } else if (err && err.name === "NotFoundError") {
+          msg = "No camera was found on this device.";
+        } else if (err && err.name === "NotReadableError") {
+          msg = "The camera is already in use by another application.";
+        }
+        showError(msg + (err && err.message ? " (" + err.name + ")" : ""));
+      })
+      .finally(function () {
+        camBtn.disabled = false;
+      });
+  }
+
+  function captureFrame() {
+    if (!stream || !camVideo.videoWidth) {
+      showError("Camera frame not ready yet — try again in a moment.");
+      return;
+    }
+    var frame = document.createElement("canvas");
+    frame.width = camVideo.videoWidth;
+    frame.height = camVideo.videoHeight;
+    frame.getContext("2d").drawImage(camVideo, 0, 0);
+    frame.toBlob(function (blob) {
+      if (!blob) {
+        showError("Could not encode the captured frame.");
+        return;
+      }
+      showFrame(blob);
+      sendToServer(blob, "webcam_frame.jpg", "image/jpeg");
+    }, "image/jpeg", 0.92);
+  }
+
+  camBtn.addEventListener("click", function () {
+    if (stream) {
+      stopCamera();
+    } else {
+      startCamera();
+    }
+  });
+
+  camCapBtn.addEventListener("click", captureFrame);
 })();
 </script>
 </body>

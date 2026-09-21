@@ -68,7 +68,7 @@ Browser overlay / result rendering
 | Python environment     | ✅ Done |
 | FastAPI service        | ✅ Done |
 | YOLO CPU inference     | ✅ Done |
-| HTML5 browser client   | ✅ Done (image upload) |
+| HTML5 browser client   | ✅ Done (image upload + webcam) |
 | Automated tests        | ✅ Done |
 
 The full engineering specification, hard constraints, and definition of done live in
@@ -182,7 +182,15 @@ A simple HTML5 page (CSS + plain JavaScript, no frameworks) served at `GET /`, s
 
 - **Image upload** — pick a file, preview it, run detection, and see bounding boxes,
   class names, and confidence values drawn over the image from the JSON response
-- **Webcam capture** — *not implemented in WO-001* (planned for a later work order)
+- **Webcam capture** — start the camera (via `navigator.mediaDevices.getUserMedia()`),
+  then **Capture & detect** grabs a single frame, sends it to `/detect`, and draws the
+  boxes over the frozen frame. The video stream never leaves your browser; only the
+  captured JPEG frame is uploaded. Continuous streaming is intentionally out of scope.
+
+> **Webcam & browsers:** camera access only works in a *secure context* —
+> `http://localhost:8000` works out of the box; on a LAN/remote host you must open the
+> page over HTTPS or from a localhost origin. The page shows a clear message if the
+> browser blocks camera access.
 
 Bounding boxes are returned in original-image pixel coordinates and are scaled to the
 displayed size by the browser automatically (the overlay canvas is sized to the image's
@@ -260,7 +268,8 @@ A green test run is evidence, not proof — test coverage is always described al
 
 ## Known limitations (WO-001)
 
-- Image upload only; webcam capture, video, and streaming are not implemented in this slice.
+- Webcam is **single-frame capture** only — no continuous camera streaming, video files, or RTSP.
+- Camera access requires a browser secure context (localhost or HTTPS); see the note in [Browser client](#browser-client).
 - One inference per request; no batching, no concurrent-inference workers.
 - The `yolo26n.pt` weights are downloaded from the internet on first run.
 - Single-process demo service: no authentication, persistence, or deployment tooling.
