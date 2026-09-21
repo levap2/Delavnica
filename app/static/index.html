@@ -124,8 +124,12 @@
         resolve();
       };
       preview.onerror = function () {
+        // Deterministic URL lifetime: revoke this frame's URL *and* the
+        // previously tracked one, so neither superseded nor failed frame
+        // URLs accumulate (re-revoking an already-revoked URL is a no-op).
         URL.revokeObjectURL(url);
-        currentFrameUrl = null;
+        if (prevUrl) URL.revokeObjectURL(prevUrl);
+        if (currentFrameUrl === url) currentFrameUrl = null;
         reject(new Error("Image failed to load."));
       };
       preview.src = url;
@@ -219,7 +223,11 @@
       preview.removeAttribute("src");
       return;
     }
-    frameReady = showFrame(currentFile).catch(function (err) {
+    // Keep frameReady as the ORIGINAL (possibly rejecting) promise so a
+    // failed preview prevents /detect; attach error reporting separately
+    // instead of consuming the rejection.
+    frameReady = showFrame(currentFile);
+    frameReady.catch(function (err) {
       showError("Could not display image: " + err.message);
     });
   });
