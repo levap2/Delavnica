@@ -68,12 +68,12 @@ Browser overlay / result rendering
 | Python environment     | ✅ Done |
 | FastAPI service        | ✅ Done |
 | YOLO CPU inference     | ✅ Done |
-| HTML5 browser client   | ✅ Done (image upload + webcam) |
+| HTML5 browser client   | ✅ Done (upload + webcam + live detection) |
 | Automated tests        | ✅ Done |
 
 The full engineering specification, hard constraints, and definition of done live in
 [AGENTS.md](AGENTS.md) — read it before contributing, whether you are a human or a coding agent.
-The sections below describe the implemented WO-001 demo slice.
+The sections below describe the current implementation: a CPU-only FastAPI service with pretrained YOLO26n inference, plus a browser client supporting image upload, single-frame webcam capture, and continuous live webcam detection.
 
 ## Requirements
 
@@ -182,10 +182,17 @@ A simple HTML5 page (CSS + plain JavaScript, no frameworks) served at `GET /`, s
 
 - **Image upload** — pick a file, preview it, run detection, and see bounding boxes,
   class names, and confidence values drawn over the image from the JSON response
-- **Webcam capture** — start the camera (via `navigator.mediaDevices.getUserMedia()`),
-  then **Capture & detect** grabs a single frame, sends it to `/detect`, and draws the
-  boxes over the frozen frame. The video stream never leaves your browser; only the
-  captured JPEG frame is uploaded. Continuous streaming is intentionally out of scope.
+- **Webcam single-frame capture** — start the camera (via
+  `navigator.mediaDevices.getUserMedia()`), then **Capture & detect** grabs one frame,
+  sends it to `/detect`, and draws the boxes over the frozen frame.
+- **Live webcam detection** — **Start live detection** continuously samples the camera
+  (about **3 processed frames per second** by default) and draws the boxes over the
+  *live* video. Only sampled JPEG frames are sent to the server as ordinary HTTP
+  requests; **at most one `/detect` request is in flight at any time** — the browser
+  waits for each response before capturing the next frame, so slow CPU inference
+  lowers the observed FPS instead of building a backlog or overlapping requests.
+  The status line shows the *measured* processed FPS, the last inference time, and the
+  device (CPU). Actual FPS depends on your CPU speed.
 
 > **Webcam & browsers:** camera access only works in a *secure context* —
 > `http://localhost:8000` works out of the box; on a LAN/remote host you must open the
@@ -268,7 +275,8 @@ A green test run is evidence, not proof — test coverage is always described al
 
 ## Known limitations
 
-- Webcam is **single-frame capture** only — no continuous camera streaming, video files, or RTSP.
+- Live webcam detection is a controlled-rate frame sampler over ordinary HTTP (one request
+  in flight); there is no server-side video streaming, WebRTC/WebSockets, video files, or RTSP.
 - Camera access requires a browser secure context (localhost or HTTPS); see the note in [Browser client](#browser-client).
 - One inference per request; no batching, no concurrent-inference workers.
 - The `yolo26n.pt` weights are downloaded from the internet on first run.

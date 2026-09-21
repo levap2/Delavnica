@@ -23,9 +23,13 @@
   .stage { position: relative; display: none; max-width: 100%; }
   .stage img { display: block; max-width: 100%; height: auto; border-radius: 6px; }
   .stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
-  video#cam {
-    display: block; width: 320px; max-width: 100%; border-radius: 6px;
-    background: #000; margin: .4rem 0;
+  .cam-stage { position: relative; display: inline-block; max-width: 100%; }
+  .cam-stage[hidden] { display: none; }
+  .cam-stage video {
+    display: block; width: 320px; max-width: 100%; border-radius: 6px; background: #000;
+  }
+  .cam-stage canvas {
+    position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none;
   }
   #error {
     display: none; margin: 1rem 0; padding: .6rem .8rem; border-radius: 6px;
@@ -53,13 +57,18 @@
   <span id="busy" class="hint" hidden>Detecting…</span>
 </div>
 
-<h2>2 · Webcam (single-frame capture)</h2>
+<h2>2 · Webcam (single frame + live detection)</h2>
 <div class="controls">
   <button id="camBtn" class="secondary">Start webcam</button>
   <button id="camCapBtn" disabled>Capture &amp; detect</button>
-  <span class="hint">Camera runs locally in your browser; only the captured frame is sent to the server.</span>
+  <button id="liveBtn" class="secondary" disabled>Start live detection</button>
+  <span class="hint">The video stream stays in your browser; sampled JPEG frames are sent to the server, one request at a time.</span>
 </div>
-<video id="cam" hidden playsinline muted></video>
+<p id="liveStatus" class="hint"></p>
+<div id="camStage" class="cam-stage" hidden>
+  <video id="cam" playsinline muted></video>
+  <canvas id="camOverlay"></canvas>
+</div>
 
 <div class="stage" id="stage">
   <img id="preview" alt="Image preview" />
@@ -83,6 +92,31 @@
   var camBtn = document.getElementById("camBtn");
   var camCapBtn = document.getElementById("camCapBtn");
   var camVideo = document.getElementById("cam");
+  var camStage = document.getElementById("camStage");
+  var camOverlay = document.getElementById("camOverlay");
+  var liveBtn = document.getElementById("liveBtn");
+  var liveStatus = document.getElementById("liveStatus");
+
+  // Live detection: latest-frame sampling, ONE /detect request in flight.
+  var TARGET_FPS = 3;
+  var TARGET_INTERVAL_MS = 1000 / TARGET_FPS; // ~333 ms
+  var captureCanvas = document.createElement("canvas"); // reused for every frame
+  var live = { active: false, generation: 0, busy: false, timer: null, cycles: [], lastInferenceMs: null };
+  var manualInFlight = false;
+  // Global single-flight guard: number of /detect requests whose fetch
+  // promise has not settled yet. stopLive() deliberately does NOT clear
+  // this — a request accepted by the server keeps running until its
+  // response arrives, and no new request (live or manual) may start
+  // while one is genuinely outstanding.
+  var inflight = 0;
+  function trackDetect(req) {
+    inflight++;
+    req.then(
+      function () { if (--inflight === 0) updateManualButtons(); },
+      function () { if (--inflight === 0) updateManualButtons(); }
+    );
+    return req;
+  }
 
   var stream = null;
   var currentFile = null;
@@ -139,11 +173,11 @@
     });
   }
 
-  function renderDetections(detections, inferenceMs, meta) {
-    var ctx = overlay.getContext("2d");
-    clearBoxes();
-
-    var rows = detections.map(function (d, i) {
+  // Draw boxes + labels in the canvas's own (original frame) coordinates.
+  // Shared by the uploaded-image path and the live webcam overlay.
+  function drawBoxes(ctx, detections) {
+    for (var i = 0; i < detections.length; i++) {
+      var d = detections[i];
       var x = d.box[0], y = d.box[1];
       var w = d.box[2] - d.box[0], h = d.box[3] - d.box[1];
       var color = "hsl(" + ((d.class_id * 47) % 360) + ", 85%, 55%)";
@@ -160,7 +194,14 @@
       ctx.fillRect(x, labelY, textW + pad * 2, 20);
       ctx.fillStyle = "#000";
       ctx.fillText(label, x + pad, labelY + 15);
+    }
+  }
 
+  function renderDetections(detections, inferenceMs, meta) {
+    clearBoxes();
+    drawBoxes(overlay.getContext("2d"), detections);
+
+    var rows = detections.map(function (d, i) {
       return "<tr><td>" + (i + 1) + "</td><td>" + escapeHtml(d.class_name) +
         "</td><td>" + d.confidence.toFixed(3) + "</td><td>" +
         d.box.map(function (v) { return v.toFixed(1); }).join(", ") + "</td></tr>";
@@ -181,6 +222,11 @@
 
   // Shared submit path for uploaded files and captured webcam frames.
   function sendToServer(blob, name, type) {
+    if (inflight > 0) {
+      showError("A detection is already running; wait for it to finish.");
+      return;
+    }
+    manualInFlight = true;
     detectBtn.disabled = true;
     camCapBtn.disabled = true;
     busy.hidden = false;
@@ -190,7 +236,7 @@
     var form = new FormData();
     form.append("file", blob, name);
 
-    fetch("/detect", { method: "POST", body: form })
+    trackDetect(fetch("/detect", { method: "POST", body: form }))
       .then(function (res) {
         return res.json().catch(function () {
           throw new Error("Server returned non-JSON response (HTTP " + res.status + ").");
@@ -208,9 +254,9 @@
         showError("Detection failed: " + err.message);
       })
       .finally(function () {
+        manualInFlight = false;
         busy.hidden = true;
-        detectBtn.disabled = !currentFile;
-        camCapBtn.disabled = !stream;
+        updateManualButtons();
       });
   }
 
@@ -218,7 +264,7 @@
 
   fileInput.addEventListener("change", function () {
     currentFile = fileInput.files && fileInput.files[0] ? fileInput.files[0] : null;
-    detectBtn.disabled = !currentFile;
+    updateManualButtons();
     showError("");
     results.innerHTML = "";
     if (!currentFile) {
@@ -248,13 +294,15 @@
   // ------------------------------------------------------------- webcam
 
   function stopCamera() {
+    stopLive(); // stopping the webcam stops live detection first
     if (stream) {
       stream.getTracks().forEach(function (t) { t.stop(); });
       stream = null;
     }
     camVideo.srcObject = null;
-    camVideo.hidden = true;
+    camStage.hidden = true;
     camCapBtn.disabled = true;
+    liveBtn.disabled = true;
     camBtn.textContent = "Start webcam";
   }
 
@@ -279,8 +327,10 @@
         return camVideo.play();
       })
       .then(function () {
-        camVideo.hidden = false;
+        camStage.hidden = false;
+        sizeCamOverlay();
         camCapBtn.disabled = false;
+        liveBtn.disabled = false;
         camBtn.textContent = "Stop webcam";
         showError("");
       })
@@ -323,6 +373,165 @@
     }, "image/jpeg", 0.92);
   }
 
+  // ------------------------------------------------- live detection
+
+  function sizeCamOverlay() {
+    if (camVideo.videoWidth && camOverlay.width !== camVideo.videoWidth)
+      camOverlay.width = camVideo.videoWidth;
+    if (camVideo.videoHeight && camOverlay.height !== camVideo.videoHeight)
+      camOverlay.height = camVideo.videoHeight;
+  }
+
+  function clearCamOverlay() {
+    var ctx = camOverlay.getContext("2d");
+    ctx.clearRect(0, 0, camOverlay.width, camOverlay.height);
+  }
+
+  function renderCamDetections(detections) {
+    sizeCamOverlay();
+    var ctx = camOverlay.getContext("2d");
+    ctx.clearRect(0, 0, camOverlay.width, camOverlay.height);
+    drawBoxes(ctx, detections);
+  }
+
+  // Actual processed FPS over the retained recent cycles (not a guess).
+  function liveFps() {
+    var n = live.cycles.length;
+    if (n < 2) return null;
+    var span = live.cycles[n - 1] - live.cycles[0];
+    if (span <= 0) return null;
+    return (n - 1) * 1000 / span;
+  }
+
+  function updateLiveStatus() {
+    if (!live.active) { liveStatus.textContent = ""; return; }
+    var parts = ["Live detection: running"];
+    var fps = liveFps();
+    if (fps != null) parts.push("Processed FPS: " + fps.toFixed(1));
+    if (live.lastInferenceMs != null)
+      parts.push("Inference: " + Math.round(live.lastInferenceMs) + " ms");
+    parts.push("Device: CPU");
+    liveStatus.textContent = parts.join(" \u00b7 ");
+  }
+
+  // Manual /detect paths are off while live runs OR while any /detect
+  // request is genuinely in flight — including one left outstanding by a
+  // stopped live session. Re-enabled by trackDetect() once it settles.
+  function updateManualButtons() {
+    detectBtn.disabled = live.active || inflight > 0 || !currentFile;
+    camCapBtn.disabled = live.active || inflight > 0 || !stream;
+  }
+
+  function updateLiveUI() {
+    liveBtn.textContent = live.active ? "Stop live detection" : "Start live detection";
+    liveBtn.disabled = !stream;
+    updateManualButtons();
+    updateLiveStatus();
+  }
+
+  function startLive() {
+    if (!stream) {
+      showError("Start the webcam before starting live detection.");
+      return;
+    }
+    if (inflight > 0 || manualInFlight) {
+      showError("A detection is already running; wait for it to finish, then start live detection.");
+      return;
+    }
+    live.active = true;
+    live.generation++;
+    live.cycles = [];
+    live.lastInferenceMs = null;
+    live.busy = false;
+    showError("");
+    updateLiveUI();
+    liveCycle();
+  }
+
+  function stopLive() {
+    live.active = false;
+    live.generation++; // invalidate any in-flight request's callback
+    if (live.timer) { clearTimeout(live.timer); live.timer = null; }
+    // NOTE: deliberately do NOT reset in-flight state here. If a /detect
+    // request is still unresolved it keeps running server-side; the
+    // `inflight` counter (cleared only when the fetch settles) blocks
+    // restart/manual detection until it has actually finished.
+    live.cycles = [];
+    live.lastInferenceMs = null;
+    clearCamOverlay();
+    updateLiveUI();
+  }
+
+  function liveFail(err) {
+    live.active = false;
+    live.generation++;
+    if (live.timer) { clearTimeout(live.timer); live.timer = null; }
+    live.busy = false;
+    live.cycles = [];
+    updateLiveUI();
+    showError("Live detection stopped: " + err.message);
+  }
+
+  function liveCycled(startedAt) {
+    var now = performance.now();
+    live.cycles.push(now);
+    if (live.cycles.length > 30) live.cycles.shift();
+    live.busy = false;
+    updateLiveStatus();
+    if (!live.active) return;
+    // Cycle time = work already done + remaining target delay. If the work
+    // already exceeded the target, start the next cycle immediately.
+    var wait = Math.max(0, TARGET_INTERVAL_MS - (now - startedAt));
+    live.timer = setTimeout(liveCycle, wait);
+  }
+
+  // Latest-frame sampling with AT MOST ONE /detect request in flight.
+  function liveCycle() {
+    if (!live.active || live.busy) return;
+    if (!camVideo.videoWidth) {
+      // Frame not ready yet; retry soon without counting a cycle.
+      live.timer = setTimeout(liveCycle, 100);
+      return;
+    }
+    live.busy = true;
+    var gen = live.generation;
+    var startedAt = performance.now();
+
+    sizeCamOverlay();
+    if (captureCanvas.width !== camVideo.videoWidth)
+      captureCanvas.width = camVideo.videoWidth;
+    if (captureCanvas.height !== camVideo.videoHeight)
+      captureCanvas.height = camVideo.videoHeight;
+    captureCanvas.getContext("2d").drawImage(camVideo, 0, 0);
+
+    captureCanvas.toBlob(function (blob) {
+      if (gen !== live.generation) return; // superseded; the new session owns live state
+      if (!live.active) { live.busy = false; return; }
+      if (!blob) { liveFail(new Error("Could not encode the camera frame.")); return; }
+      var form = new FormData();
+      form.append("file", blob, "webcam_live.jpg");
+      trackDetect(fetch("/detect", { method: "POST", body: form }))
+        .then(function (res) {
+          return res.json().catch(function () {
+            throw new Error("Server returned non-JSON response (HTTP " + res.status + ").");
+          }).then(function (body) {
+            if (!res.ok) throw new Error((body && body.detail) ? body.detail : "HTTP " + res.status);
+            return body;
+          });
+        })
+        .then(function (body) {
+          if (gen !== live.generation || !live.active) return; // stale: ignore
+          live.lastInferenceMs = body.inference_ms;
+          renderCamDetections(body.detections || []);
+          liveCycled(startedAt);
+        })
+        .catch(function (err) {
+          if (gen !== live.generation || !live.active) return; // stale: ignore
+          liveFail(err);
+        });
+    }, "image/jpeg", 0.92);
+  }
+
   camBtn.addEventListener("click", function () {
     if (stream) {
       stopCamera();
@@ -332,6 +541,10 @@
   });
 
   camCapBtn.addEventListener("click", captureFrame);
+
+  liveBtn.addEventListener("click", function () {
+    if (live.active) { stopLive(); } else { startLive(); }
+  });
 })();
 </script>
 </body>
