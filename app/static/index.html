@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Delavnica — CPU YOLO detection</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    max-width: 960px; margin: 0 auto; padding: 1rem; line-height: 1.45;
+  }
+  h1 { font-size: 1.4rem; }
+  .hint { opacity: .75; font-size: .9rem; }
+  .controls { display: flex; gap: .75rem; align-items: center; flex-wrap: wrap; margin: 1rem 0; }
+  button {
+    padding: .5rem 1.1rem; font-size: 1rem; cursor: pointer;
+    border: 1px solid #888; border-radius: 6px; background: #2563eb; color: #fff;
+  }
+  button:disabled { opacity: .55; cursor: wait; }
+  .stage { position: relative; display: none; max-width: 100%; }
+  .stage img { display: block; max-width: 100%; height: auto; border-radius: 6px; }
+  .stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  #error {
+    display: none; margin: 1rem 0; padding: .6rem .8rem; border-radius: 6px;
+    background: #7f1d1d; color: #fee2e2; white-space: pre-wrap;
+  }
+  #results { margin-top: 1rem; font-size: .95rem; }
+  #results table { border-collapse: collapse; margin-top: .5rem; }
+  #results th, #results td { border: 1px solid #8884; padding: .25rem .5rem; text-align: left; }
+  .meta { opacity: .75; font-size: .85rem; margin-top: .4rem; }
+</style>
+</head>
+<body>
+<h1>Delavnica — CPU-only YOLO detection</h1>
+<p class="hint">
+  Choose an image, then run detection. The server runs pretrained
+  <code>yolo26n.pt</code> on CPU and draws boxes here from the JSON response.
+</p>
+
+<div class="controls">
+  <input type="file" id="file" accept="image/*" />
+  <button id="detectBtn" disabled>Detect</button>
+  <span id="busy" class="hint" hidden>Detecting…</span>
+</div>
+
+<div id="error" role="alert"></div>
+
+<div class="stage" id="stage">
+  <img id="preview" alt="Uploaded image preview" />
+  <canvas id="overlay"></canvas>
+</div>
+
+<div id="results"></div>
+
+<script>
+(function () {
+  "use strict";
+
+  var fileInput = document.getElementById("file");
+  var detectBtn = document.getElementById("detectBtn");
+  var busy = document.getElementById("busy");
+  var errorBox = document.getElementById("error");
+  var stage = document.getElementById("stage");
+  var preview = document.getElementById("preview");
+  var overlay = document.getElementById("overlay");
+  var results = document.getElementById("results");
+  var currentFile = null;
+
+  function showError(message) {
+    errorBox.textContent = message;
+    errorBox.style.display = message ? "block" : "none";
+  }
+
+  function clearBoxes() {
+    overlay.getContext("2d").clearRect(0, 0, overlay.width, overlay.height);
+  }
+
+  function renderDetections(detections, inferenceMs, meta) {
+    var ctx = overlay.getContext("2d");
+    clearBoxes();
+
+    var rows = detections.map(function (d, i) {
+      // Draw in original-image pixel coordinates; the canvas is sized to the
+      // image's natural dimensions and scaled by CSS to the displayed size,
+      // so coordinates map 1:1 without manual scaling.
+      var x = d.box[0], y = d.box[1];
+      var w = d.box[2] - d.box[0], h = d.box[3] - d.box[1];
+      var color = "hsl(" + ((d.class_id * 47) % 360) + ", 85%, 55%)";
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 3;
+      ctx.strokeRect(x, y, w, h);
+
+      var label = d.class_name + " " + (d.confidence * 100).toFixed(1) + "%";
+      ctx.font = "16px system-ui, sans-serif";
+      var pad = 4;
+      var textW = ctx.measureText(label).width;
+      var labelY = y > 24 ? y - 24 : y + 4;
+      ctx.fillStyle = color;
+      ctx.fillRect(x, labelY, textW + pad * 2, 20);
+      ctx.fillStyle = "#000";
+      ctx.fillText(label, x + pad, labelY + 15);
+
+      return "<tr><td>" + (i + 1) + "</td><td>" + escapeHtml(d.class_name) +
+        "</td><td>" + d.confidence.toFixed(3) + "</td><td>" +
+        d.box.map(function (v) { return v.toFixed(1); }).join(", ") + "</td></tr>";
+    }).join("");
+
+    results.innerHTML =
+      (detections.length
+        ? "<p>Detected " + detections.length + " object(s).</p>" +
+          "<table><thead><tr><th>#</th><th>class</th><th>confidence</th><th>box [x1, y1, x2, y2]</th></tr></thead>" +
+          "<tbody>" + rows + "</tbody></table>"
+        : "<p>No objects detected in this image.</p>") +
+      (inferenceMs != null
+        ? "<p class='meta'>inference: " + inferenceMs + " ms · image " +
+          meta.image_width + "×" + meta.image_height + " · model " +
+          escapeHtml(meta.model) + " · device " + escapeHtml(meta.device) + "</p>"
+        : "");
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+
+  fileInput.addEventListener("change", function () {
+    currentFile = fileInput.files && fileInput.files[0] ? fileInput.files[0] : null;
+    detectBtn.disabled = !currentFile;
+    showError("");
+    results.innerHTML = "";
+    if (!currentFile) {
+      stage.style.display = "none";
+      preview.removeAttribute("src");
+      return;
+    }
+    var url = URL.createObjectURL(currentFile);
+    preview.onload = function () {
+      // Size the canvas to the image's natural (original) dimensions.
+      overlay.width = preview.naturalWidth;
+      overlay.height = preview.naturalHeight;
+      stage.style.display = "block";
+    };
+    preview.src = url;
+  });
+
+  detectBtn.addEventListener("click", function () {
+    if (!currentFile) return;
+    detectBtn.disabled = true;
+    busy.hidden = false;
+    showError("");
+    results.innerHTML = "";
+
+    var form = new FormData();
+    form.append("file", currentFile);
+
+    fetch("/detect", { method: "POST", body: form })
+      .then(function (res) {
+        return res.json().catch(function () {
+          throw new Error("Server returned non-JSON response (HTTP " + res.status + ").");
+        }).then(function (body) {
+          if (!res.ok) {
+            var msg = (body && body.detail) ? body.detail : "HTTP " + res.status;
+            throw new Error(msg);
+          }
+          return body;
+        });
+      })
+      .then(function (body) {
+        renderDetections(body.detections || [], body.inference_ms, body);
+      })
+      .catch(function (err) {
+        showError("Detection failed: " + err.message);
+      })
+      .finally(function () {
+        busy.hidden = true;
+        detectBtn.disabled = false;
+      });
+  });
+})();
+</script>
+</body>
+</html>
