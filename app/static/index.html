@@ -103,6 +103,20 @@
   var captureCanvas = document.createElement("canvas"); // reused for every frame
   var live = { active: false, generation: 0, busy: false, timer: null, cycles: [], lastInferenceMs: null };
   var manualInFlight = false;
+  // Global single-flight guard: number of /detect requests whose fetch
+  // promise has not settled yet. stopLive() deliberately does NOT clear
+  // this — a request accepted by the server keeps running until its
+  // response arrives, and no new request (live or manual) may start
+  // while one is genuinely outstanding.
+  var inflight = 0;
+  function trackDetect(req) {
+    inflight++;
+    req.then(
+      function () { if (--inflight === 0) updateManualButtons(); },
+      function () { if (--inflight === 0) updateManualButtons(); }
+    );
+    return req;
+  }
 
   var stream = null;
   var currentFile = null;
@@ -208,6 +222,10 @@
 
   // Shared submit path for uploaded files and captured webcam frames.
   function sendToServer(blob, name, type) {
+    if (inflight > 0) {
+      showError("A detection is already running; wait for it to finish.");
+      return;
+    }
     manualInFlight = true;
     detectBtn.disabled = true;
     camCapBtn.disabled = true;
@@ -218,7 +236,7 @@
     var form = new FormData();
     form.append("file", blob, name);
 
-    fetch("/detect", { method: "POST", body: form })
+    trackDetect(fetch("/detect", { method: "POST", body: form }))
       .then(function (res) {
         return res.json().catch(function () {
           throw new Error("Server returned non-JSON response (HTTP " + res.status + ").");
@@ -238,8 +256,7 @@
       .finally(function () {
         manualInFlight = false;
         busy.hidden = true;
-        detectBtn.disabled = live.active || !currentFile;
-        camCapBtn.disabled = live.active || !stream;
+        updateManualButtons();
       });
   }
 
@@ -247,7 +264,7 @@
 
   fileInput.addEventListener("change", function () {
     currentFile = fileInput.files && fileInput.files[0] ? fileInput.files[0] : null;
-    detectBtn.disabled = live.active || !currentFile;
+    updateManualButtons();
     showError("");
     results.innerHTML = "";
     if (!currentFile) {
@@ -397,13 +414,18 @@
     liveStatus.textContent = parts.join(" \u00b7 ");
   }
 
+  // Manual /detect paths are off while live runs OR while any /detect
+  // request is genuinely in flight — including one left outstanding by a
+  // stopped live session. Re-enabled by trackDetect() once it settles.
+  function updateManualButtons() {
+    detectBtn.disabled = live.active || inflight > 0 || !currentFile;
+    camCapBtn.disabled = live.active || inflight > 0 || !stream;
+  }
+
   function updateLiveUI() {
     liveBtn.textContent = live.active ? "Stop live detection" : "Start live detection";
     liveBtn.disabled = !stream;
-    // While live runs, manual /detect paths are disabled to preserve
-    // the one-request-in-flight invariant.
-    detectBtn.disabled = live.active || !currentFile;
-    camCapBtn.disabled = live.active || !stream;
+    updateManualButtons();
     updateLiveStatus();
   }
 
@@ -412,7 +434,7 @@
       showError("Start the webcam before starting live detection.");
       return;
     }
-    if (manualInFlight) {
+    if (inflight > 0 || manualInFlight) {
       showError("A detection is already running; wait for it to finish, then start live detection.");
       return;
     }
@@ -430,7 +452,10 @@
     live.active = false;
     live.generation++; // invalidate any in-flight request's callback
     if (live.timer) { clearTimeout(live.timer); live.timer = null; }
-    live.busy = false;
+    // NOTE: deliberately do NOT reset in-flight state here. If a /detect
+    // request is still unresolved it keeps running server-side; the
+    // `inflight` counter (cleared only when the fetch settles) blocks
+    // restart/manual detection until it has actually finished.
     live.cycles = [];
     live.lastInferenceMs = null;
     clearCamOverlay();
@@ -480,11 +505,12 @@
     captureCanvas.getContext("2d").drawImage(camVideo, 0, 0);
 
     captureCanvas.toBlob(function (blob) {
-      if (gen !== live.generation || !live.active) { live.busy = false; return; }
+      if (gen !== live.generation) return; // superseded; the new session owns live state
+      if (!live.active) { live.busy = false; return; }
       if (!blob) { liveFail(new Error("Could not encode the camera frame.")); return; }
       var form = new FormData();
       form.append("file", blob, "webcam_live.jpg");
-      fetch("/detect", { method: "POST", body: form })
+      trackDetect(fetch("/detect", { method: "POST", body: form }))
         .then(function (res) {
           return res.json().catch(function () {
             throw new Error("Server returned non-JSON response (HTTP " + res.status + ").");

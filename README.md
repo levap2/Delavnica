@@ -73,7 +73,7 @@ Browser overlay / result rendering
 
 The full engineering specification, hard constraints, and definition of done live in
 [AGENTS.md](AGENTS.md) — read it before contributing, whether you are a human or a coding agent.
-The sections below describe the implemented WO-001 demo slice.
+The sections below describe the current implementation: a CPU-only FastAPI service with pretrained YOLO26n inference, plus a browser client supporting image upload, single-frame webcam capture, and continuous live webcam detection.
 
 ## Requirements
 
