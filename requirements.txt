@@ -1,0 +1,11 @@
+# Delavnica — CPU-only YOLO detection demo (WO-001)
+# Versions as installed and verified on Python 3.14.4 / Ubuntu 26.04.
+ultralytics==8.4.157
+fastapi==0.141.1
+uvicorn==0.53.0
+python-multipart==0.0.32
+Pillow==12.3.0
+
+# Test dependencies
+pytest==9.1.1
+httpx==0.28.1

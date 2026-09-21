@@ -216,3 +216,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Delavnica runtime state
+# Downloaded model weights (re-downloaded automatically at startup)
+*.pt
+# Inference output artifacts
+runs/
+nohup.out
