@@ -86,6 +86,12 @@
 
   var stream = null;
   var currentFile = null;
+  var currentFrameUrl = null;
+  // Resolves once the current preview image is fully loaded AND the overlay
+  // canvas dimensions have been established. Detection rendering is only
+  // allowed to complete after this promise (prevents the preview/detection
+  // ordering race).
+  var frameReady = Promise.resolve();
 
   function showError(message) {
     errorBox.textContent = message;
@@ -103,15 +109,27 @@
   }
 
   function showFrame(blob) {
-    var url = URL.createObjectURL(blob);
-    preview.onload = function () {
-      // Size the canvas to the image's natural dimensions so that
-      // original-coordinate boxes map 1:1 onto the displayed frame.
-      overlay.width = preview.naturalWidth;
-      overlay.height = preview.naturalHeight;
-      stage.style.display = "block";
-    };
-    preview.src = url;
+    return new Promise(function (resolve, reject) {
+      var url = URL.createObjectURL(blob);
+      var prevUrl = currentFrameUrl;
+      currentFrameUrl = url;
+      preview.onload = function () {
+        // Size the canvas to the image's natural dimensions so that
+        // original-coordinate boxes map 1:1 onto the displayed frame.
+        // Only after this is the frame ready for detection rendering.
+        overlay.width = preview.naturalWidth;
+        overlay.height = preview.naturalHeight;
+        stage.style.display = "block";
+        if (prevUrl) URL.revokeObjectURL(prevUrl);
+        resolve();
+      };
+      preview.onerror = function () {
+        URL.revokeObjectURL(url);
+        currentFrameUrl = null;
+        reject(new Error("Image failed to load."));
+      };
+      preview.src = url;
+    });
   }
 
   function renderDetections(detections, inferenceMs, meta) {
@@ -201,12 +219,18 @@
       preview.removeAttribute("src");
       return;
     }
-    showFrame(currentFile);
+    frameReady = showFrame(currentFile).catch(function (err) {
+      showError("Could not display image: " + err.message);
+    });
   });
 
   detectBtn.addEventListener("click", function () {
     if (currentFile) {
-      sendToServer(currentFile, currentFile.name, currentFile.type || "application/octet-stream");
+      frameReady.then(function () {
+        sendToServer(currentFile, currentFile.name, currentFile.type || "application/octet-stream");
+      }).catch(function (err) {
+        showError(err.message);
+      });
     }
   });
 
@@ -279,8 +303,12 @@
         showError("Could not encode the captured frame.");
         return;
       }
-      showFrame(blob);
-      sendToServer(blob, "webcam_frame.jpg", "image/jpeg");
+      frameReady = showFrame(blob).then(function () {
+        sendToServer(blob, "webcam_frame.jpg", "image/jpeg");
+      });
+      frameReady.catch(function (err) {
+        showError("Could not display captured frame: " + err.message);
+      });
     }, "image/jpeg", 0.92);
   }
 

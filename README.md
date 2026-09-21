@@ -24,7 +24,7 @@ The goal is a working, reproducible demo — not a production platform.
 - [CPU-only constraint](#cpu-only-constraint)
 - [Performance policy](#performance-policy)
 - [Testing](#testing)
-- [Known limitations (WO-001)](#known-limitations-wo-001)
+- [Known limitations](#known-limitations)
 - [Contributing & agent workflow](#contributing--agent-workflow)
 - [License](#license)
 
@@ -266,7 +266,7 @@ Coverage (per `AGENTS.md` and WO-001):
 
 A green test run is evidence, not proof — test coverage is always described alongside results.
 
-## Known limitations (WO-001)
+## Known limitations
 
 - Webcam is **single-frame capture** only — no continuous camera streaming, video files, or RTSP.
 - Camera access requires a browser secure context (localhost or HTTPS); see the note in [Browser client](#browser-client).
