@@ -119,7 +119,10 @@
         // Only after this is the frame ready for detection rendering.
         overlay.width = preview.naturalWidth;
         overlay.height = preview.naturalHeight;
-        stage.style.display = "block";
+        // inline-block makes the stage shrink-wrap the rendered image, so
+        // the absolutely-positioned overlay (inset:0; 100%/100%) covers
+        // exactly the displayed image rectangle — never the wider container.
+        stage.style.display = "inline-block";
         if (prevUrl) URL.revokeObjectURL(prevUrl);
         resolve();
       };
